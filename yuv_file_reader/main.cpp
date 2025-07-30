@@ -3,6 +3,13 @@
 #include <fstream>
 #include <string>
 
+// Ideas for features:
+// Seeking (back and forwards using arrow keys)
+// Play/Pause
+// Render frame number on each frame (and PTS, do we get those in a raw file?)
+// Decoding of h264 mp4 files - next!
+// SSIM of previous and current frames
+
 int main(int argc, char* argv[]) {
     if (SDL_Init(SDL_INIT_VIDEO) != 0) {
         std::cerr << "SDL_Init Error: " << SDL_GetError() << "\n";
