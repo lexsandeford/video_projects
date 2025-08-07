@@ -26,10 +26,8 @@ bool running {true};
 // Decoding of h264 mp4 files - next!
 // SSIM of previous and current frames
 
-void decode_frame()
-{
-
-}
+// NEXT UP: Tidy MP4 decode work
+// set up a linter and formatter
 
 void decoder_thread(const std::string & filename)
 {
@@ -95,103 +93,41 @@ void decoder_thread(const std::string & filename)
 }
 
 // this can only run in the main thread of the program
-void render_thread()
+void render_from_queue(SDL_Renderer * renderer, SDL_Texture * texture)
 {
-    try{
-        // TODO: get width and height from video
-        // create a window to render the frames onto
-        SDL_Window * window = SDL_CreateWindow("YUV Player",
-            SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
-            1920, 1080, SDL_WINDOW_SHOWN);
+    std::unique_lock<std::mutex> lock(queueMutex);
+    // we're in the main thread so we shouldn't block
+    queueCv.wait_for(lock, std::chrono::milliseconds(10), [&] {return !frameQueue.empty();});
+    if (!frameQueue.empty())
+    {
+        // take a frame from the queue
+        AVFrame * frame = frameQueue.front();
+        frameQueue.pop();
+        queueMutex.unlock();
+        queueCv.notify_all();
 
-        if (window == nullptr)
-        {
-            std::cerr << "Failed to create SDL window: " << SDL_GetError() << std::endl;
-        }
-
-        // enable VSync. This means that the graphics system will wait until the display is
-        // finished rendering the current frame before swapping in the new (back) buffer
-        // This prevents tearing
-        SDL_Renderer * renderer = SDL_CreateRenderer(window, -1, SDL_RENDERER_PRESENTVSYNC);
-
-        if (renderer == nullptr)
-        {
-            std::cerr << "Failed to create SDL renderer" << std::endl;
-        }
-
-        // create a texture to reuse whilst rendering
-        // TODO: get the width and height here too
-        SDL_Texture* texture = SDL_CreateTexture(
-            renderer,
-            SDL_PIXELFORMAT_IYUV,  // YUV420P
-            SDL_TEXTUREACCESS_STREAMING,
-            1920, 1080
+        // turn it into an SDL texture
+        SDL_UpdateYUVTexture(
+            texture, NULL,
+            frame->data[0], frame->linesize[0], // Y
+            frame->data[1], frame->linesize[1], // U
+            frame->data[2], frame->linesize[2]  // V
         );
 
-        if (texture == nullptr)
-        {
-            std::cerr << "Failed to create SDL texture" << std::endl;
-        }
+        // render it
+        SDL_RenderClear(renderer);
+        SDL_RenderCopy(renderer, texture, nullptr, nullptr);
+        SDL_RenderPresent(renderer);
 
-        while (running)
-        {
-            // poll the SDL event loop
-            SDL_Event event;
-            while (SDL_PollEvent(&event))
-            {
-                if (event.type == SDL_QUIT)
-                {
-                    running = false;
-                }
-            }
+        // TODO: update this to use PTS
+        // TODO: now we're in the main thread, we shouldn't block
+        SDL_Delay(33);
 
-            std::unique_lock<std::mutex> lock(queueMutex);
-            // we're in the main thread so we shouldn't block
-            queueCv.wait_for(lock, std::chrono::milliseconds(10), [&] {return !frameQueue.empty();});
-            if (!frameQueue.empty())
-            {
-                // take a frame from the queue
-                AVFrame * frame = frameQueue.front();
-                frameQueue.pop();
-                queueMutex.unlock();
-                queueCv.notify_all();
-
-                // turn it into an SDL texture
-                SDL_UpdateYUVTexture(
-                    texture, NULL,
-                    frame->data[0], frame->linesize[0], // Y
-                    frame->data[1], frame->linesize[1], // U
-                    frame->data[2], frame->linesize[2]  // V
-                );
-
-                // render it
-                SDL_RenderClear(renderer);
-                SDL_RenderCopy(renderer, texture, nullptr, nullptr);
-                SDL_RenderPresent(renderer);
-
-                // TODO: update this to use PTS
-                // TODO: now we're in the main thread, we shouldn't block
-                SDL_Delay(33);
-
-                av_frame_free(&frame);
-            }
-            else
-            {
-                lock.unlock();
-            }
-        }
-
-        SDL_DestroyTexture(texture);
-        SDL_DestroyRenderer(renderer);
-        SDL_DestroyWindow(window);
-
-        SDL_Quit();
+        av_frame_free(&frame);
     }
-    catch (const std::exception& ex) {
-        std::cerr << "Exception in render thread: " << ex.what() << std::endl;
-    }
-    catch (...) {
-        std::cerr << "Unknown exception in render thread" << std::endl;
+    else
+    {
+        lock.unlock();
     }
 }
 
@@ -208,13 +144,78 @@ int main(int argc, char* argv[]) {
         return -1;
     }
 
-    std::thread producer(decoder_thread, std::string(argv[1]));
-    //std::thread consumer(render_thread);
+    SDL_Window * window;
+    SDL_Renderer * renderer;
+    SDL_Texture * texture;
 
-    render_thread();
+    try
+    {
+        // TODO: get width and height from video
+        // create a window to render the frames onto
+        window = SDL_CreateWindow("YUV Player",
+            SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
+            1920, 1080, SDL_WINDOW_SHOWN);
+
+        if (window == nullptr)
+        {
+            std::cerr << "Failed to create SDL window: " << SDL_GetError() << std::endl;
+        }
+
+        // enable VSync. This means that the graphics system will wait until the display is
+        // finished rendering the current frame before swapping in the new (back) buffer
+        // This prevents tearing
+        renderer = SDL_CreateRenderer(window, -1, SDL_RENDERER_PRESENTVSYNC);
+
+        if (renderer == nullptr)
+        {
+            std::cerr << "Failed to create SDL renderer" << std::endl;
+        }
+
+        // create a texture to reuse whilst rendering
+        // TODO: get the width and height here too
+        texture = SDL_CreateTexture(
+            renderer,
+            SDL_PIXELFORMAT_IYUV,  // YUV420P
+            SDL_TEXTUREACCESS_STREAMING,
+            1920, 1080
+        );
+
+        if (texture == nullptr)
+        {
+            std::cerr << "Failed to create SDL texture" << std::endl;
+        }
+    }
+    catch (const std::exception& ex) {
+        std::cerr << "Exception in render thread: " << ex.what() << std::endl;
+    }
+    catch (...) {
+        std::cerr << "Unknown exception in render thread" << std::endl;
+    }
+
+    std::thread producer(decoder_thread, std::string(argv[1]));
+
+    while (running)
+    {
+        // poll the SDL event loop
+        SDL_Event event;
+        while (SDL_PollEvent(&event))
+        {
+            if (event.type == SDL_QUIT)
+            {
+                running = false;
+            }
+        }
+
+        render_from_queue(renderer, texture);
+    }
 
     producer.join();
-    //consumer.join();
+
+    SDL_DestroyTexture(texture);
+    SDL_DestroyRenderer(renderer);
+    SDL_DestroyWindow(window);
+
+    SDL_Quit();
 
     return 0;
 }
